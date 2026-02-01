@@ -84,7 +84,7 @@ app.post('/auth/oauth/start', async (c: Context) => {
 app.post('/auth/oauth/callback', async (c: Context) => {
   try {
     const body = await c.req.json()
-    const { code } = body
+    const { code, sessionId } = body
 
     if (!code) {
       return c.json<ErrorResponse>(
@@ -96,11 +96,21 @@ app.post('/auth/oauth/callback', async (c: Context) => {
       )
     }
 
-    // Extract verifier from code if it contains #
+    // Use sessionId as verifier, or try to extract from code if it contains #
     const splits = code.split('#')
-    const verifier = splits[1] || ''
+    const verifier = sessionId || splits[1] || ''
 
-    await handleOAuthCallback(code, verifier)
+    if (!verifier) {
+      return c.json<ErrorResponse>(
+        {
+          error: 'Missing session',
+          message: 'Please click "Connect with Claude" first to start the OAuth flow',
+        },
+        400,
+      )
+    }
+
+    await handleOAuthCallback(splits[0], verifier)
 
     return c.json<SuccessResponse>({
       success: true,

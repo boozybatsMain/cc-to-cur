@@ -382,6 +382,7 @@
 
       let authWindow = null
       let authCheckInterval = null
+      let currentSessionId = null
 
       async function checkAuthStatus() {
         try {
@@ -427,6 +428,9 @@
           const data = await response.json()
 
           if (data.authUrl) {
+            // Store the session ID (PKCE verifier) for later use
+            currentSessionId = data.sessionId
+            
             // Open auth window
             authWindow = window.open(
               data.authUrl,
@@ -475,7 +479,7 @@
             headers: {
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ code }),
+            body: JSON.stringify({ code, sessionId: currentSessionId }),
           })
 
           const data = await response.json()
