@@ -320,11 +320,18 @@ const messagesFn = async (c: Context) => {
       )
     }
 
+    // When thinking is enabled, remove temperature (not supported with thinking)
+    if (body.thinking) {
+      delete (body as any).temperature
+      delete (body as any).top_p
+      delete (body as any).top_k
+    }
+
     headers = {
       'content-type': 'application/json',
       authorization: `Bearer ${oauthToken}`,
       'anthropic-beta':
-        'oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14',
+        'oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14',
       'anthropic-version': '2023-06-01',
       'user-agent': '@anthropic-ai/sdk 1.2.12 node/22.13.1',
       accept: isStreaming ? 'text/event-stream' : 'application/json',
