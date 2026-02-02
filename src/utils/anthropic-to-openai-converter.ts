@@ -200,7 +200,10 @@ export function convertNonStreamingResponse(
   let textContent = ''
   for (const block of anthropicResponse.content || []) {
     if (block.type === 'thinking' && block.thinking) {
-      textContent += `<thinking>\n${block.thinking}\n</thinking>\n\n`
+      // Add reasoning_content to the message (DeepSeek-style)
+      ;(openAIResponse.choices[0].message as any).reasoning_content = 
+        ((openAIResponse.choices[0].message as any).reasoning_content || '') + block.thinking
+      continue
     } else if (block.type === 'text') {
       textContent += block.text
     } else if (block.type === 'tool_use' && block.id && block.name) {
@@ -526,7 +529,7 @@ function transformToOpenAI(
       }
     }
   } else if (data.type === 'content_block_delta' && data.delta?.thinking) {
-    // Convert thinking content to visible text wrapped in markers
+    // Send thinking as reasoning_content (used by DeepSeek, may work in Cursor)
     openAIChunk = {
       id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
       object: 'chat.completion.chunk' as const,
@@ -535,7 +538,7 @@ function transformToOpenAI(
       choices: [
         {
           index: 0,
-          delta: { content: data.delta.thinking },
+          delta: { reasoning_content: data.delta.thinking } as any,
           finish_reason: null,
         },
       ],
