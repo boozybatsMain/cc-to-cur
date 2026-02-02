@@ -130,6 +130,7 @@ interface MetricsData {
   output_tokens: number
   messageId: string | null
   openAIId: string | null
+  inThinking: boolean
 }
 
 interface ProcessResult {
@@ -156,6 +157,7 @@ export function createConverterState(): ConverterState {
       output_tokens: 0,
       messageId: null,
       openAIId: null,
+      inThinking: false,
     },
   }
 }
@@ -200,9 +202,7 @@ export function convertNonStreamingResponse(
   let textContent = ''
   for (const block of anthropicResponse.content || []) {
     if (block.type === 'thinking' && block.thinking) {
-      // Add reasoning_content to the message (DeepSeek-style)
-      ;(openAIResponse.choices[0].message as any).reasoning_content = 
-        ((openAIResponse.choices[0].message as any).reasoning_content || '') + block.thinking
+      textContent += `\n> **💭 Thinking...**\n> \n> *${block.thinking.replace(/\n/g, '\n> ')}*\n\n---\n\n`
       continue
     } else if (block.type === 'text') {
       textContent += block.text
@@ -251,7 +251,12 @@ export function processChunk(
         )
 
         // Skip certain event types that OpenAI doesn't use
-        if (data.type === 'ping' || data.type === 'content_block_stop') {
+        if (data.type === 'ping') {
+          continue
+        }
+
+        // Handle content_block_stop - close thinking block if needed
+        if (data.type === 'content_block_stop') {
           continue
         }
 
@@ -529,21 +534,46 @@ function transformToOpenAI(
       }
     }
   } else if (data.type === 'content_block_delta' && data.delta?.thinking) {
-    // Send thinking as reasoning_content (used by DeepSeek, may work in Cursor)
-    openAIChunk = {
-      id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
-      object: 'chat.completion.chunk' as const,
-      created: Math.floor(Date.now() / 1000),
-      model: state.metricsData.model || 'claude-unknown',
-      choices: [
-        {
-          index: 0,
-          delta: { reasoning_content: data.delta.thinking } as any,
-          finish_reason: null,
-        },
-      ],
+    // Send thinking as italic markdown with a visible marker
+    // Track if this is the start of a thinking block
+    if (!state.metricsData.inThinking) {
+      state.metricsData.inThinking = true
+      const prefix = '\n> **💭 Thinking...**\n> \n> *'
+      openAIChunk = {
+        id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
+        object: 'chat.completion.chunk' as const,
+        created: Math.floor(Date.now() / 1000),
+        model: state.metricsData.model || 'claude-unknown',
+        choices: [
+          {
+            index: 0,
+            delta: { content: prefix + data.delta.thinking.replace(/\n/g, '\n> ') },
+            finish_reason: null,
+          },
+        ],
+      }
+    } else {
+      openAIChunk = {
+        id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
+        object: 'chat.completion.chunk' as const,
+        created: Math.floor(Date.now() / 1000),
+        model: state.metricsData.model || 'claude-unknown',
+        choices: [
+          {
+            index: 0,
+            delta: { content: data.delta.thinking.replace(/\n/g, '\n> ') },
+            finish_reason: null,
+          },
+        ],
+      }
     }
   } else if (data.type === 'content_block_delta' && data.delta?.text) {
+    // If transitioning from thinking to text, close the thinking block
+    let prefix = ''
+    if (state.metricsData.inThinking) {
+      state.metricsData.inThinking = false
+      prefix = '*\n\n---\n\n'
+    }
     openAIChunk = {
       id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
       object: 'chat.completion.chunk' as const,
@@ -552,7 +582,7 @@ function transformToOpenAI(
       choices: [
         {
           index: 0,
-          delta: { content: data.delta.text },
+          delta: { content: prefix + data.delta.text },
           finish_reason: null,
         },
       ],
