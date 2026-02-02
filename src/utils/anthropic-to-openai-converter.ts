@@ -14,19 +14,21 @@ interface AnthropicMessage {
 }
 
 interface AnthropicContentBlock {
-  type: 'text' | 'tool_use'
+  type: 'text' | 'tool_use' | 'thinking'
   id?: string
   name?: string
   text?: string
+  thinking?: string
   input?: unknown
 }
 
-interface AnthropicStreamEvent {
+  interface AnthropicStreamEvent {
   type: string
   message?: AnthropicMessage
   content_block?: AnthropicContentBlock
   delta?: {
     text?: string
+    thinking?: string
     partial_json?: string
     stop_reason?: string
   }
@@ -197,7 +199,9 @@ export function convertNonStreamingResponse(
   // Process content blocks
   let textContent = ''
   for (const block of anthropicResponse.content || []) {
-    if (block.type === 'text') {
+    if (block.type === 'thinking' && block.thinking) {
+      textContent += `<thinking>\n${block.thinking}\n</thinking>\n\n`
+    } else if (block.type === 'text') {
       textContent += block.text
     } else if (block.type === 'tool_use' && block.id && block.name) {
       openAIResponse.choices[0].message.tool_calls.push({
@@ -248,10 +252,10 @@ export function processChunk(
           continue
         }
 
-        // Skip text content_block_start (we only care about tool_use blocks)
+        // Skip text and thinking content_block_start (we only care about tool_use blocks)
         if (
           data.type === 'content_block_start' &&
-          data.content_block?.type === 'text'
+          (data.content_block?.type === 'text' || data.content_block?.type === 'thinking')
         ) {
           continue
         }
@@ -520,6 +524,21 @@ function transformToOpenAI(
           JSON.stringify(openAIChunk, null, 2),
         )
       }
+    }
+  } else if (data.type === 'content_block_delta' && data.delta?.thinking) {
+    // Convert thinking content to visible text wrapped in markers
+    openAIChunk = {
+      id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
+      object: 'chat.completion.chunk' as const,
+      created: Math.floor(Date.now() / 1000),
+      model: state.metricsData.model || 'claude-unknown',
+      choices: [
+        {
+          index: 0,
+          delta: { content: data.delta.thinking },
+          finish_reason: null,
+        },
+      ],
     }
   } else if (data.type === 'content_block_delta' && data.delta?.text) {
     openAIChunk = {
