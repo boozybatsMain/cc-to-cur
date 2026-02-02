@@ -131,6 +131,7 @@ interface MetricsData {
   messageId: string | null
   openAIId: string | null
   inThinking: boolean
+  thinkingBuffer: string
 }
 
 interface ProcessResult {
@@ -158,6 +159,7 @@ export function createConverterState(): ConverterState {
       messageId: null,
       openAIId: null,
       inThinking: false,
+      thinkingBuffer: '',
     },
   }
 }
@@ -202,7 +204,12 @@ export function convertNonStreamingResponse(
   let textContent = ''
   for (const block of anthropicResponse.content || []) {
     if (block.type === 'thinking' && block.thinking) {
-      textContent += `\n> **💭 Thinking...**\n> \n> *${block.thinking.replace(/\n/g, '\n> ')}*\n\n---\n\n`
+      const thoughts = block.thinking
+        .split(/\n+/)
+        .map((t: string) => t.trim())
+        .filter((t: string) => t.length > 0)
+        .join(' • ')
+      textContent += `🧠💭 *${thoughts}* 🧠💤\n\n---\n\n`
       continue
     } else if (block.type === 'text') {
       textContent += block.text
@@ -279,6 +286,29 @@ export function processChunk(
             type: 'chunk',
             data: openAIChunk,
           })
+        }
+
+        // Flush thinking buffer if still open when message stops
+        if (data.type === 'message_stop' && state.metricsData.inThinking) {
+          state.metricsData.inThinking = false
+          const thoughts = state.metricsData.thinkingBuffer
+            .split(/\n+/)
+            .map((t: string) => t.trim())
+            .filter((t: string) => t.length > 0)
+            .join(' • ')
+          state.metricsData.thinkingBuffer = ''
+          const thinkingChunk: OpenAIStreamChunk = {
+            id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
+            object: 'chat.completion.chunk' as const,
+            created: Math.floor(Date.now() / 1000),
+            model: state.metricsData.model || 'claude-unknown',
+            choices: [{
+              index: 0,
+              delta: { content: `🧠💭 *${thoughts}* 🧠💤\n\n---\n\n` },
+              finish_reason: null,
+            }],
+          }
+          results.push({ type: 'chunk', data: thinkingChunk })
         }
 
         // Send usage chunk and [DONE] when message stops
@@ -534,45 +564,25 @@ function transformToOpenAI(
       }
     }
   } else if (data.type === 'content_block_delta' && data.delta?.thinking) {
-    // Send thinking as italic markdown with a visible marker
-    // Track if this is the start of a thinking block
+    // Accumulate thinking text, compact newlines into bullet points
     if (!state.metricsData.inThinking) {
       state.metricsData.inThinking = true
-      const prefix = '\n> **💭 Thinking...**\n> \n> *'
-      openAIChunk = {
-        id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
-        object: 'chat.completion.chunk' as const,
-        created: Math.floor(Date.now() / 1000),
-        model: state.metricsData.model || 'claude-unknown',
-        choices: [
-          {
-            index: 0,
-            delta: { content: prefix + data.delta.thinking.replace(/\n/g, '\n> ') },
-            finish_reason: null,
-          },
-        ],
-      }
-    } else {
-      openAIChunk = {
-        id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
-        object: 'chat.completion.chunk' as const,
-        created: Math.floor(Date.now() / 1000),
-        model: state.metricsData.model || 'claude-unknown',
-        choices: [
-          {
-            index: 0,
-            delta: { content: data.delta.thinking.replace(/\n/g, '\n> ') },
-            finish_reason: null,
-          },
-        ],
-      }
+      state.metricsData.thinkingBuffer = ''
     }
+    state.metricsData.thinkingBuffer += data.delta.thinking
+    // Don't emit chunks yet - we'll flush when thinking ends
   } else if (data.type === 'content_block_delta' && data.delta?.text) {
-    // If transitioning from thinking to text, close the thinking block
+    // If transitioning from thinking to text, flush thinking buffer
     let prefix = ''
     if (state.metricsData.inThinking) {
       state.metricsData.inThinking = false
-      prefix = '*\n\n---\n\n'
+      const thoughts = state.metricsData.thinkingBuffer
+        .split(/\n+/)
+        .map((t: string) => t.trim())
+        .filter((t: string) => t.length > 0)
+        .join(' • ')
+      prefix = `🧠💭 *${thoughts}* 🧠💤\n\n---\n\n`
+      state.metricsData.thinkingBuffer = ''
     }
     openAIChunk = {
       id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
