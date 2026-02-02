@@ -255,6 +255,17 @@ const messagesFn = async (c: Context) => {
     return c.json(createCursorBypassResponse())
   }
 
+  // Remove OpenAI-specific parameters that Claude doesn't accept
+  delete (body as any).stream_options
+  delete (body as any).frequency_penalty
+  delete (body as any).presence_penalty
+  delete (body as any).logit_bias
+  delete (body as any).logprobs
+  delete (body as any).top_logprobs
+  delete (body as any).n
+  delete (body as any).user
+  delete (body as any).response_format
+
   try {
     let transformToOpenAIFormat = false
 
