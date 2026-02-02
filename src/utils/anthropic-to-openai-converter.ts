@@ -210,7 +210,7 @@ export function convertNonStreamingResponse(
         .split(/\n+/)
         .map((t: string) => t.trim())
         .filter((t: string) => t.length > 0)
-        .map((t: string) => `*• ${t}*`)
+        .map((t: string) => `*${t}*`)
         .join('\n\n')
       textContent += `🧠💭\n\n${lines}\n\n🧠💤\n\n---\n\n`
       continue
@@ -581,7 +581,7 @@ function transformToOpenAI(
       } else {
         // Non-whitespace character - add bullet prefix if needed
         if (state.metricsData.needsBullet && text[i].trim()) {
-          processed += '\n\n*• '
+          processed += '\n\n*'
           state.metricsData.needsBullet = false
         }
         processed += text[i]
