@@ -131,6 +131,8 @@ interface MetricsData {
   messageId: string | null
   openAIId: string | null
   inThinking: boolean
+  hadThinking: boolean
+  answerStarted: boolean
   thinkingBuffer: string
   needsBullet: boolean
 }
@@ -160,6 +162,8 @@ export function createConverterState(): ConverterState {
       messageId: null,
       openAIId: null,
       inThinking: false,
+      hadThinking: false,
+      answerStarted: false,
       thinkingBuffer: '',
       needsBullet: true,
     },
@@ -212,7 +216,7 @@ export function convertNonStreamingResponse(
         .filter((t: string) => t.length > 0)
         .map((t: string) => `*${t}*`)
         .join('\n\n')
-      textContent += `🧠💭\n\n${lines}\n\n🧠💤\n\n---\n\n`
+      textContent += `🧠💭\n\n${lines}\n\n💤🧠\n\n---\n\n👉🏼 `
       continue
     } else if (block.type === 'text') {
       textContent += block.text
@@ -265,8 +269,25 @@ export function processChunk(
           continue
         }
 
-        // Handle content_block_stop - close thinking block if needed
+        // Handle content_block_stop - close thinking if this was a thinking block
         if (data.type === 'content_block_stop') {
+          if (state.metricsData.inThinking) {
+            state.metricsData.inThinking = false
+            // If needsBullet is true, italic was already closed by a newline
+            const closeItalic = state.metricsData.needsBullet ? '' : '*'
+            const closeChunk: OpenAIStreamChunk = {
+              id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
+              object: 'chat.completion.chunk' as const,
+              created: Math.floor(Date.now() / 1000),
+              model: state.metricsData.model || 'claude-unknown',
+              choices: [{
+                index: 0,
+                delta: { content: closeItalic + '\n\n💤🧠\n\n---\n\n' },
+                finish_reason: null,
+              }],
+            }
+            results.push({ type: 'chunk', data: closeChunk })
+          }
           continue
         }
 
@@ -291,9 +312,10 @@ export function processChunk(
           })
         }
 
-        // Close thinking if still open when message stops
+        // Fallback: close thinking if still open when message stops
         if (data.type === 'message_stop' && state.metricsData.inThinking) {
           state.metricsData.inThinking = false
+          const closeItalic = state.metricsData.needsBullet ? '' : '*'
           const thinkingChunk: OpenAIStreamChunk = {
             id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
             object: 'chat.completion.chunk' as const,
@@ -301,7 +323,7 @@ export function processChunk(
             model: state.metricsData.model || 'claude-unknown',
             choices: [{
               index: 0,
-              delta: { content: '*\n\n🧠💤\n\n---\n\n' },
+              delta: { content: closeItalic + '\n\n💤🧠\n\n---\n\n' },
               finish_reason: null,
             }],
           }
@@ -565,6 +587,8 @@ function transformToOpenAI(
     let content = ''
     if (!state.metricsData.inThinking) {
       state.metricsData.inThinking = true
+      state.metricsData.hadThinking = true
+      state.metricsData.answerStarted = false
       state.metricsData.needsBullet = true
       content = '🧠💭\n\n'
     }
@@ -603,11 +627,11 @@ function transformToOpenAI(
       }
     }
   } else if (data.type === 'content_block_delta' && data.delta?.text) {
-    // If transitioning from thinking to text, close thinking
+    // Add 👉🏼 prefix on the first text chunk after thinking was shown
     let prefix = ''
-    if (state.metricsData.inThinking) {
-      state.metricsData.inThinking = false
-      prefix = '*\n\n🧠💤\n\n---\n\n'
+    if (state.metricsData.hadThinking && !state.metricsData.answerStarted) {
+      state.metricsData.answerStarted = true
+      prefix = '👉🏼 '
     }
     openAIChunk = {
       id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
