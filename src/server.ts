@@ -300,9 +300,10 @@ const messagesFn = async (c: Context) => {
       }
 
       // Always enable extended thinking
+      const maxTokens = (body.max_tokens as number) || 32000
       body.thinking = {
         type: 'enabled',
-        budget_tokens: body.max_tokens > 16000 ? 16000 : body.max_tokens - 1000,
+        budget_tokens: maxTokens > 16000 ? 16000 : maxTokens - 1000,
       }
     }
 
