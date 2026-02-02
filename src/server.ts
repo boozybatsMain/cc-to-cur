@@ -299,14 +299,10 @@ const messagesFn = async (c: Context) => {
         body.max_tokens = 64_000
       }
 
-      // Enable extended thinking if model name contains 'thinking'
-      if (body.model.includes('thinking')) {
-        // Strip '-thinking' from the model name for the API call
-        body.model = body.model.replace('-thinking', '')
-        body.thinking = {
-          type: 'enabled',
-          budget_tokens: body.max_tokens > 16000 ? 16000 : body.max_tokens - 1000,
-        }
+      // Always enable extended thinking
+      body.thinking = {
+        type: 'enabled',
+        budget_tokens: body.max_tokens > 16000 ? 16000 : body.max_tokens - 1000,
       }
     }
 
