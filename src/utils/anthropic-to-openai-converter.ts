@@ -132,7 +132,7 @@ interface MetricsData {
   openAIId: string | null
   inThinking: boolean
   thinkingBuffer: string
-  thinkingLineCount: number
+  needsBullet: boolean
 }
 
 interface ProcessResult {
@@ -161,7 +161,7 @@ export function createConverterState(): ConverterState {
       openAIId: null,
       inThinking: false,
       thinkingBuffer: '',
-      thinkingLineCount: 0,
+      needsBullet: true,
     },
   }
 }
@@ -210,7 +210,7 @@ export function convertNonStreamingResponse(
         .split(/\n+/)
         .map((t: string) => t.trim())
         .filter((t: string) => t.length > 0)
-        .map((t: string, i: number) => `*${i + 1}. ${t}*`)
+        .map((t: string) => `*• ${t}*`)
         .join('\n\n')
       textContent += `🧠💭\n\n${lines}\n\n🧠💤\n\n---\n\n`
       continue
@@ -561,34 +561,30 @@ function transformToOpenAI(
       }
     }
   } else if (data.type === 'content_block_delta' && data.delta?.thinking) {
-    // Stream thinking instantly
+    // Stream thinking instantly with bullet dots, skip empty lines
     let content = ''
     if (!state.metricsData.inThinking) {
       state.metricsData.inThinking = true
-      state.metricsData.thinkingLineCount = 0
+      state.metricsData.needsBullet = true
       content = '🧠💭\n\n'
     }
 
-    // Replace newlines with numbered italic lines
     const text = data.delta.thinking
-    // Process each character, tracking newlines to add bullet numbers
     let processed = ''
     for (let i = 0; i < text.length; i++) {
       if (text[i] === '\n') {
-        // Check if next non-whitespace exists (not just trailing newlines)
-        const rest = text.substring(i + 1).trim()
-        if (rest.length > 0) {
-          state.metricsData.thinkingLineCount++
-          processed += '*\n\n*' + state.metricsData.thinkingLineCount + '. '
+        // Close italic, mark that next non-empty content needs a bullet
+        if (!state.metricsData.needsBullet) {
+          processed += '*'
+          state.metricsData.needsBullet = true
         }
       } else {
-        // If this is the very first character of thinking, start italic + first number
-        if (processed === '' && content.endsWith('💭\n\n')) {
-          state.metricsData.thinkingLineCount++
-          processed = '*' + state.metricsData.thinkingLineCount + '. ' + text[i]
-        } else {
-          processed += text[i]
+        // Non-whitespace character - add bullet prefix if needed
+        if (state.metricsData.needsBullet && text[i].trim()) {
+          processed += '\n\n*• '
+          state.metricsData.needsBullet = false
         }
+        processed += text[i]
       }
     }
 
