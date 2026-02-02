@@ -301,7 +301,7 @@ export function processChunk(
             model: state.metricsData.model || 'claude-unknown',
             choices: [{
               index: 0,
-              delta: { content: '* 🧠💤\n\n---\n\n' },
+              delta: { content: '*\n\n🧠💤\n\n---\n\n' },
               finish_reason: null,
             }],
           }
@@ -611,7 +611,7 @@ function transformToOpenAI(
     let prefix = ''
     if (state.metricsData.inThinking) {
       state.metricsData.inThinking = false
-      prefix = '* 🧠💤\n\n---\n\n'
+      prefix = '*\n\n🧠💤\n\n---\n\n'
     }
     openAIChunk = {
       id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
