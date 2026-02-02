@@ -132,6 +132,7 @@ interface MetricsData {
   openAIId: string | null
   inThinking: boolean
   thinkingBuffer: string
+  thinkingLineCount: number
 }
 
 interface ProcessResult {
@@ -160,6 +161,7 @@ export function createConverterState(): ConverterState {
       openAIId: null,
       inThinking: false,
       thinkingBuffer: '',
+      thinkingLineCount: 0,
     },
   }
 }
@@ -204,12 +206,13 @@ export function convertNonStreamingResponse(
   let textContent = ''
   for (const block of anthropicResponse.content || []) {
     if (block.type === 'thinking' && block.thinking) {
-      const thoughts = block.thinking
+      const lines = block.thinking
         .split(/\n+/)
         .map((t: string) => t.trim())
         .filter((t: string) => t.length > 0)
-        .join(' • ')
-      textContent += `🧠💭 *${thoughts}* 🧠💤\n\n---\n\n`
+        .map((t: string, i: number) => `*${i + 1}. ${t}*`)
+        .join('\n\n')
+      textContent += `🧠💭\n\n${lines}\n\n🧠💤\n\n---\n\n`
       continue
     } else if (block.type === 'text') {
       textContent += block.text
@@ -288,15 +291,9 @@ export function processChunk(
           })
         }
 
-        // Flush thinking buffer if still open when message stops
+        // Close thinking if still open when message stops
         if (data.type === 'message_stop' && state.metricsData.inThinking) {
           state.metricsData.inThinking = false
-          const thoughts = state.metricsData.thinkingBuffer
-            .split(/\n+/)
-            .map((t: string) => t.trim())
-            .filter((t: string) => t.length > 0)
-            .join(' • ')
-          state.metricsData.thinkingBuffer = ''
           const thinkingChunk: OpenAIStreamChunk = {
             id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
             object: 'chat.completion.chunk' as const,
@@ -304,7 +301,7 @@ export function processChunk(
             model: state.metricsData.model || 'claude-unknown',
             choices: [{
               index: 0,
-              delta: { content: `🧠💭 *${thoughts}* 🧠💤\n\n---\n\n` },
+              delta: { content: '* 🧠💤\n\n---\n\n' },
               finish_reason: null,
             }],
           }
@@ -564,25 +561,57 @@ function transformToOpenAI(
       }
     }
   } else if (data.type === 'content_block_delta' && data.delta?.thinking) {
-    // Accumulate thinking text, compact newlines into bullet points
+    // Stream thinking instantly
+    let content = ''
     if (!state.metricsData.inThinking) {
       state.metricsData.inThinking = true
-      state.metricsData.thinkingBuffer = ''
+      state.metricsData.thinkingLineCount = 0
+      content = '🧠💭\n\n'
     }
-    state.metricsData.thinkingBuffer += data.delta.thinking
-    // Don't emit chunks yet - we'll flush when thinking ends
+
+    // Replace newlines with numbered italic lines
+    const text = data.delta.thinking
+    // Process each character, tracking newlines to add bullet numbers
+    let processed = ''
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '\n') {
+        // Check if next non-whitespace exists (not just trailing newlines)
+        const rest = text.substring(i + 1).trim()
+        if (rest.length > 0) {
+          state.metricsData.thinkingLineCount++
+          processed += '*\n\n*' + state.metricsData.thinkingLineCount + '. '
+        }
+      } else {
+        // If this is the very first character of thinking, start italic + first number
+        if (processed === '' && content.endsWith('💭\n\n')) {
+          state.metricsData.thinkingLineCount++
+          processed = '*' + state.metricsData.thinkingLineCount + '. ' + text[i]
+        } else {
+          processed += text[i]
+        }
+      }
+    }
+
+    content += processed
+    if (content) {
+      openAIChunk = {
+        id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
+        object: 'chat.completion.chunk' as const,
+        created: Math.floor(Date.now() / 1000),
+        model: state.metricsData.model || 'claude-unknown',
+        choices: [{
+          index: 0,
+          delta: { content },
+          finish_reason: null,
+        }],
+      }
+    }
   } else if (data.type === 'content_block_delta' && data.delta?.text) {
-    // If transitioning from thinking to text, flush thinking buffer
+    // If transitioning from thinking to text, close thinking
     let prefix = ''
     if (state.metricsData.inThinking) {
       state.metricsData.inThinking = false
-      const thoughts = state.metricsData.thinkingBuffer
-        .split(/\n+/)
-        .map((t: string) => t.trim())
-        .filter((t: string) => t.length > 0)
-        .join(' • ')
-      prefix = `🧠💭 *${thoughts}* 🧠💤\n\n---\n\n`
-      state.metricsData.thinkingBuffer = ''
+      prefix = '* 🧠💤\n\n---\n\n'
     }
     openAIChunk = {
       id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
