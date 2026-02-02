@@ -84,7 +84,7 @@ app.post('/auth/oauth/start', async (c: Context) => {
 app.post('/auth/oauth/callback', async (c: Context) => {
   try {
     const body = await c.req.json()
-    const { code, sessionId } = body
+    const { code } = body
 
     if (!code) {
       return c.json<ErrorResponse>(
@@ -96,21 +96,11 @@ app.post('/auth/oauth/callback', async (c: Context) => {
       )
     }
 
-    // Use sessionId as verifier, or try to extract from code if it contains #
+    // Extract verifier from code if it contains #
     const splits = code.split('#')
-    const verifier = sessionId || splits[1] || ''
+    const verifier = splits[1] || ''
 
-    if (!verifier) {
-      return c.json<ErrorResponse>(
-        {
-          error: 'Missing session',
-          message: 'Please click "Connect with Claude" first to start the OAuth flow',
-        },
-        400,
-      )
-    }
-
-    await handleOAuthCallback(splits[0], verifier)
+    await handleOAuthCallback(code, verifier)
 
     return c.json<SuccessResponse>({
       success: true,
@@ -245,15 +235,19 @@ const messagesFn = async (c: Context) => {
   const body: AnthropicRequestBody = await c.req.json()
   const isStreaming = body.stream === true
 
-  const apiKey = c.req.header('authorization')?.split(' ')?.[1]
-  if (apiKey && apiKey !== process.env.API_KEY) {
-    return c.json(
-      {
-        error: 'Authentication required',
-        message: 'Please authenticate use the API key from the .env file',
-      },
-      401,
-    )
+  // Only check API key if API_KEY env var is set and not empty/placeholder
+  const envApiKey = process.env.API_KEY
+  if (envApiKey && envApiKey !== '' && envApiKey !== '-' && envApiKey !== '_') {
+    const apiKey = c.req.header('authorization')?.split(' ')?.[1]
+    if (apiKey !== envApiKey) {
+      return c.json(
+        {
+          error: 'Authentication required',
+          message: 'API key does not match. Check your Vercel API_KEY environment variable.',
+        },
+        401,
+      )
+    }
   }
 
   // Bypass cursor enable openai key check
