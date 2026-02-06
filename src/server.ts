@@ -229,11 +229,38 @@ app.get('/v1/models', async (c: Context) => {
   }
 })
 
+// Normalize model names from various formats to valid Anthropic model IDs
+function normalizeModelName(model: string): string {
+  const originalModel = model
+  
+  // Handle Cursor's format like "claude-4.6-opus-high" -> "claude-opus-4-6"
+  // Pattern: claude-{version}-{family}-{variant}
+  const cursorPattern = /^claude-(\d+(?:\.\d+)?)-(\w+)(?:-\w+)?$/i
+  const match = model.match(cursorPattern)
+  if (match) {
+    const version = match[1].replace('.', '-') // "4.6" -> "4-6"
+    const family = match[2].toLowerCase() // "opus", "sonnet", "haiku"
+    model = `claude-${family}-${version}`
+  }
+  
+  // Also handle dots in version: "claude-opus-4.6" -> "claude-opus-4-6"
+  model = model.replace(/claude-(\w+)-(\d+)\.(\d+)/i, 'claude-$1-$2-$3')
+  
+  if (model !== originalModel) {
+    console.log(`Normalized model name: ${originalModel} -> ${model}`)
+  }
+  
+  return model
+}
+
 const messagesFn = async (c: Context) => {
   let headers: Record<string, string> = c.req.header() as Record<string, string>
   headers.host = 'api.anthropic.com'
   const body: AnthropicRequestBody = await c.req.json()
   const isStreaming = body.stream === true
+  
+  // Normalize model name to valid Anthropic format
+  body.model = normalizeModelName(body.model)
 
   // Only check API key if API_KEY env var is set and not empty/placeholder
   const envApiKey = process.env.API_KEY
@@ -301,7 +328,7 @@ const messagesFn = async (c: Context) => {
 
       // Enable extended thinking
       // Opus 4.6+ requires adaptive thinking (budget_tokens is deprecated)
-      if (body.model.includes('opus-4-6') || body.model.includes('opus-4.6')) {
+      if (body.model.includes('opus-4-6')) {
         body.thinking = {
           type: 'adaptive',
         }
