@@ -299,11 +299,19 @@ const messagesFn = async (c: Context) => {
         body.max_tokens = 64_000
       }
 
-      // Always enable extended thinking
-      const maxTokens = (body.max_tokens as number) || 32000
-      body.thinking = {
-        type: 'enabled',
-        budget_tokens: maxTokens > 16000 ? 16000 : maxTokens - 1000,
+      // Enable extended thinking
+      // Opus 4.6+ requires adaptive thinking (budget_tokens is deprecated)
+      if (body.model.includes('opus-4-6') || body.model.includes('opus-4.6')) {
+        body.thinking = {
+          type: 'adaptive',
+        }
+      } else {
+        // Older models use budget_tokens
+        const maxTokens = (body.max_tokens as number) || 32000
+        body.thinking = {
+          type: 'enabled',
+          budget_tokens: maxTokens > 16000 ? 16000 : maxTokens - 1000,
+        }
       }
     }
 
