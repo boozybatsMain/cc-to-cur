@@ -113,7 +113,7 @@ For detailed instructions or alternative deployment methods, see our **[Deployme
    - Enable "Override OpenAI Base URL"
    - Enter: `http://localhost:9095/v1` (for local) or `https://your-app.vercel.app/v1` (for Vercel)
    - If you set an API_KEY during deployment, add it to your API key field in Cursor
-   - **Important**: Select the **`deepseek-coder`** model in Cursor's model dropdown. The proxy advertises this model name and automatically routes requests to Claude Opus 4.6 behind the scenes. Using `deepseek-coder` ensures Cursor sends requests through the proxy correctly with full tool support and extended thinking enabled.
+   - **Important**: Select the **`claude-3-5-sonnet-20241022`** model in Cursor's model dropdown. The proxy advertises this model name but automatically routes requests to Claude Opus 4.6 behind the scenes. Since Cursor recognizes it as a Claude model, it sends requests in the efficient native Anthropic format with no extra overhead.
 
 ## 🎉 Advantages of this solution
 

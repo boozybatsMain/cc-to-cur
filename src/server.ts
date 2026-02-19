@@ -220,7 +220,7 @@ app.get('/v1/models', async (c: Context) => {
         id: alias,
         object: 'model' as const,
         created: Math.floor(Date.now() / 1000),
-        owned_by: 'deepseek',
+        owned_by: 'anthropic',
       })
     }
 
@@ -240,8 +240,9 @@ app.get('/v1/models', async (c: Context) => {
 })
 
 // Map of alias model names to actual Anthropic model IDs
+// Use older Claude model names so Cursor still sends Anthropic-native format
 const MODEL_ALIASES: Record<string, string> = {
-  'deepseek-coder': 'claude-opus-4-6',
+  'claude-3-5-sonnet-20241022': 'claude-opus-4-6',
 }
 
 // Normalize model names from various formats to valid Anthropic model IDs
