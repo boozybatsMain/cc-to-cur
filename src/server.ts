@@ -442,7 +442,7 @@ const messagesFn = async (c: Context) => {
       }
 
       if (body.model.includes('opus')) {
-        body.max_tokens = 128_000
+        body.max_tokens = 32_000
       }
       if (body.model.includes('sonnet')) {
         body.max_tokens = 64_000
