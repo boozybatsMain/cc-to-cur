@@ -316,6 +316,71 @@ const messagesFn = async (c: Context) => {
   delete (body as any).user
   delete (body as any).response_format
 
+  // Convert OpenAI tool_choice format to Anthropic format
+  if ((body as any).tool_choice !== undefined) {
+    const tc = (body as any).tool_choice
+    if (tc === 'auto') {
+      (body as any).tool_choice = { type: 'auto' }
+    } else if (tc === 'none') {
+      delete (body as any).tool_choice
+    } else if (tc === 'required') {
+      (body as any).tool_choice = { type: 'any' }
+    } else if (tc?.type === 'function' && tc?.function?.name) {
+      (body as any).tool_choice = { type: 'tool', name: tc.function.name }
+    }
+  }
+
+  // Convert OpenAI-format tools to Anthropic format
+  if ((body as any).tools) {
+    (body as any).tools = (body as any).tools
+      .map((tool: any) => {
+        if (tool.type === 'function' && tool.function) {
+          return {
+            name: tool.function.name,
+            description: tool.function.description || '',
+            input_schema: tool.function.parameters || { type: 'object', properties: {} },
+          }
+        }
+        return tool
+      })
+  }
+
+  // Convert OpenAI-format messages to Anthropic format
+  if (body.messages) {
+    const convertedMessages: any[] = []
+    for (const msg of body.messages) {
+      if (msg.role === 'assistant' && msg.tool_calls) {
+        const content: any[] = []
+        if (msg.content) {
+          content.push({ type: 'text', text: msg.content })
+        }
+        for (const tc of msg.tool_calls) {
+          content.push({
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.function?.name || '',
+            input: typeof tc.function?.arguments === 'string'
+              ? JSON.parse(tc.function.arguments || '{}')
+              : (tc.function?.arguments || {}),
+          })
+        }
+        convertedMessages.push({ role: 'assistant', content })
+      } else if (msg.role === 'tool') {
+        convertedMessages.push({
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: msg.tool_call_id,
+            content: msg.content || '',
+          }],
+        })
+      } else {
+        convertedMessages.push(msg)
+      }
+    }
+    body.messages = convertedMessages
+  }
+
   try {
     let transformToOpenAIFormat = false
 
