@@ -532,17 +532,17 @@ export default app
 
 // Start server for local development with extended timeouts for long thinking
 if (process.env.NODE_ENV !== 'production') {
-  import('@hono/node-server').then(({ serve }) => {
-    const server = serve({
-      fetch: app.fetch,
-      port: Number(port),
-    })
-
-    const httpServer = server as import('node:http').Server
-    httpServer.requestTimeout = 0
-    httpServer.headersTimeout = 0
-    httpServer.timeout = 0
-
-    console.log(`🚀 Server running on http://localhost:${port}`)
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { serve } = require('@hono/node-server') as { serve: Function }
+  const server = serve({
+    fetch: app.fetch,
+    port: Number(port),
   })
+
+  const httpServer = server as import('node:http').Server
+  httpServer.requestTimeout = 0
+  httpServer.headersTimeout = 0
+  httpServer.timeout = 0
+
+  console.log(`🚀 Server running on http://localhost:${port}`)
 }

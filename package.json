@@ -28,6 +28,7 @@
   "author": "Maol-1997",
   "license": "MIT",
   "dependencies": {
+    "@hono/node-server": "^1.19.9",
     "@upstash/redis": "^1.35.1",
     "hono": "^4.8.3"
   },
