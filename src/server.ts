@@ -240,9 +240,9 @@ app.get('/v1/models', async (c: Context) => {
 })
 
 // Map of alias model names to actual Anthropic model IDs
-// Use older Claude model names so Cursor still sends Anthropic-native format
+// Use a supported Claude model name so Cursor sends Anthropic-native format
 const MODEL_ALIASES: Record<string, string> = {
-  'claude-3-5-sonnet-20241022': 'claude-opus-4-6',
+  'claude-sonnet-4-5-20250514': 'claude-opus-4-6',
 }
 
 // Normalize model names from various formats to valid Anthropic model IDs
