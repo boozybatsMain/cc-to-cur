@@ -354,7 +354,7 @@ const messagesFn = async (c: Context) => {
     for (const msg of body.messages) {
       if (msg.role === 'assistant' && msg.tool_calls) {
         const content: any[] = []
-        if (msg.content) {
+        if (msg.content && String(msg.content).trim()) {
           content.push({ type: 'text', text: String(msg.content) })
         }
         for (const tc of msg.tool_calls) {
@@ -374,23 +374,35 @@ const messagesFn = async (c: Context) => {
           content: [{
             type: 'tool_result',
             tool_use_id: msg.tool_call_id,
-            content: String(msg.content ?? ''),
+            content: String(msg.content ?? '') || ' ',
           }],
         })
       } else {
         const converted = { ...msg }
-        // Normalize content: ensure text fields are valid strings
         if (converted.content === null || converted.content === undefined) {
-          converted.content = ''
+          // Assistant messages can omit content; user messages need non-empty text
+          if (converted.role === 'user') {
+            converted.content = ' '
+          } else {
+            converted.content = [{ type: 'text', text: ' ' }]
+          }
         } else if (Array.isArray(converted.content)) {
-          converted.content = converted.content.map((part: any) => {
-            if (part.type === 'text') {
-              return { ...part, text: String(part.text ?? '') }
-            }
-            return part
-          })
+          converted.content = converted.content
+            .map((part: any) => {
+              if (part.type === 'text') {
+                const text = String(part.text ?? '').trim()
+                return text ? { ...part, text } : null
+              }
+              return part
+            })
+            .filter(Boolean)
+          if (converted.content.length === 0) {
+            converted.content = [{ type: 'text', text: ' ' }]
+          }
+        } else if (typeof converted.content === 'string' && !converted.content.trim()) {
+          converted.content = ' '
         } else if (typeof converted.content !== 'string') {
-          converted.content = String(converted.content)
+          converted.content = String(converted.content) || ' '
         }
         convertedMessages.push(converted)
       }
