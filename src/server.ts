@@ -277,11 +277,14 @@ function normalizeModelName(model: string): string {
 }
 
 const messagesFn = async (c: Context) => {
+  try {
   let headers: Record<string, string> = c.req.header() as Record<string, string>
   headers.host = 'api.anthropic.com'
   const body: AnthropicRequestBody = await c.req.json()
   const isStreaming = body.stream === true
   
+  console.log(`[REQ] model=${body.model} stream=${isStreaming} messages=${body.messages?.length ?? 0} tools=${(body as any).tools?.length ?? 0}`)
+
   // Normalize model name to valid Anthropic format
   body.model = normalizeModelName(body.model)
 
@@ -415,9 +418,14 @@ const messagesFn = async (c: Context) => {
       })
 
       for (const sysMsg of systemMessages) {
+        const sysText = typeof sysMsg.content === 'string'
+          ? sysMsg.content
+          : Array.isArray(sysMsg.content)
+            ? sysMsg.content.map((p: any) => p.text ?? '').join('\n')
+            : String(sysMsg.content ?? '')
         body.system.push({
           type: 'text',
-          text: sysMsg.content || ''
+          text: sysText,
         })
       }
 
@@ -484,6 +492,8 @@ const messagesFn = async (c: Context) => {
         body.system = []
       }
     }
+
+    console.log(`[FWD] model=${body.model} transform=${transformToOpenAIFormat} thinking=${JSON.stringify(body.thinking)} max_tokens=${body.max_tokens} msgs=${body.messages?.length} tools=${(body as any).tools?.length ?? 0}`)
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -596,6 +606,13 @@ const messagesFn = async (c: Context) => {
     console.error('Proxy error:', error)
     return c.json<ErrorResponse>(
       { error: 'Proxy error', details: (error as Error).message },
+      500,
+    )
+  }
+  } catch (outerError) {
+    console.error('[FATAL] Unhandled error in messagesFn:', outerError)
+    return c.json<ErrorResponse>(
+      { error: 'Internal error', details: (outerError as Error).message },
       500,
     )
   }
