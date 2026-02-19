@@ -1,6 +1,5 @@
 import { Hono, Context } from 'hono'
 import { stream } from 'hono/streaming'
-import { serve } from '@hono/node-server'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getAccessToken } from './auth/oauth-manager'
@@ -533,17 +532,17 @@ export default app
 
 // Start server for local development with extended timeouts for long thinking
 if (process.env.NODE_ENV !== 'production') {
-  const server = serve({
-    fetch: app.fetch,
-    port: Number(port),
+  import('@hono/node-server').then(({ serve }) => {
+    const server = serve({
+      fetch: app.fetch,
+      port: Number(port),
+    })
+
+    const httpServer = server as import('node:http').Server
+    httpServer.requestTimeout = 0
+    httpServer.headersTimeout = 0
+    httpServer.timeout = 0
+
+    console.log(`🚀 Server running on http://localhost:${port}`)
   })
-
-  // Disable request timeout to support very long thinking/streaming responses
-  // Node.js 18+ defaults to 5 minutes which can be too short for extended thinking
-  const httpServer = server as import('node:http').Server
-  httpServer.requestTimeout = 0
-  httpServer.headersTimeout = 0
-  httpServer.timeout = 0
-
-  console.log(`🚀 Server running on http://localhost:${port}`)
 }
