@@ -1,5 +1,6 @@
 import { Hono, Context } from 'hono'
 import { stream } from 'hono/streaming'
+import { serve } from '@hono/node-server'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getAccessToken } from './auth/oauth-manager'
@@ -214,6 +215,16 @@ app.get('/v1/models', async (c: Context) => {
     // Sort models by created timestamp (newest first)
     models.sort((a, b) => b.created - a.created)
 
+    // Add alias models that map to real Anthropic models
+    for (const [alias] of Object.entries(MODEL_ALIASES)) {
+      models.unshift({
+        id: alias,
+        object: 'model' as const,
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'deepseek',
+      })
+    }
+
     const response_data: ModelsListResponse = {
       object: 'list',
       data: models,
@@ -229,9 +240,22 @@ app.get('/v1/models', async (c: Context) => {
   }
 })
 
+// Map of alias model names to actual Anthropic model IDs
+const MODEL_ALIASES: Record<string, string> = {
+  'deepseek-coder': 'claude-opus-4-6',
+}
+
 // Normalize model names from various formats to valid Anthropic model IDs
 function normalizeModelName(model: string): string {
   const originalModel = model
+
+  // Check alias map first
+  const lowerModel = model.toLowerCase()
+  if (MODEL_ALIASES[lowerModel]) {
+    model = MODEL_ALIASES[lowerModel]
+    console.log(`Normalized model name: ${originalModel} -> ${model}`)
+    return model
+  }
   
   // Handle Cursor's format like "claude-4.6-opus-high" -> "claude-opus-4-6"
   // Pattern: claude-{version}-{family}-{variant}
@@ -320,7 +344,7 @@ const messagesFn = async (c: Context) => {
       }
 
       if (body.model.includes('opus')) {
-        body.max_tokens = 32_000
+        body.max_tokens = 1_000_000
       }
       if (body.model.includes('sonnet')) {
         body.max_tokens = 64_000
@@ -387,6 +411,7 @@ const messagesFn = async (c: Context) => {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: c.req.raw.signal,
     })
 
     if (!response.ok) {
@@ -443,7 +468,10 @@ const messagesFn = async (c: Context) => {
               const results = processChunk(converterState, chunk, enableLogging)
 
               for (const result of results) {
-                if (result.type === 'chunk') {
+                if (result.type === 'ping') {
+                  // Forward as SSE comment to keep connection alive during long thinking
+                  await stream.write(': ping\n\n')
+                } else if (result.type === 'chunk') {
                   const dataToSend = `data: ${JSON.stringify(result.data)}\n\n`
                   if (enableLogging) {
                     console.log('✅ [SENDING] OpenAI Chunk:', dataToSend)
@@ -503,4 +531,19 @@ const port = process.env.PORT || 9095
 // Export app for Vercel
 export default app
 
-// Server is started differently for local development vs Vercel
+// Start server for local development with extended timeouts for long thinking
+if (process.env.NODE_ENV !== 'production') {
+  const server = serve({
+    fetch: app.fetch,
+    port: Number(port),
+  })
+
+  // Disable request timeout to support very long thinking/streaming responses
+  // Node.js 18+ defaults to 5 minutes which can be too short for extended thinking
+  const httpServer = server as import('node:http').Server
+  httpServer.requestTimeout = 0
+  httpServer.headersTimeout = 0
+  httpServer.timeout = 0
+
+  console.log(`🚀 Server running on http://localhost:${port}`)
+}

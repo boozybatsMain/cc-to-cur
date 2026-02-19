@@ -138,7 +138,7 @@ interface MetricsData {
 }
 
 interface ProcessResult {
-  type: 'chunk' | 'done'
+  type: 'chunk' | 'done' | 'ping'
   data?: OpenAIStreamChunk
 }
 
@@ -264,8 +264,9 @@ export function processChunk(
           trimmedLine.replace(/^data: /, ''),
         )
 
-        // Skip certain event types that OpenAI doesn't use
+        // Forward ping events as keepalive signals to prevent proxy/client timeouts
         if (data.type === 'ping') {
+          results.push({ type: 'ping' })
           continue
         }
 
