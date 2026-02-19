@@ -320,95 +320,102 @@ const messagesFn = async (c: Context) => {
   delete (body as any).user
   delete (body as any).response_format
 
-  // Convert OpenAI tool_choice format to Anthropic format
-  if ((body as any).tool_choice !== undefined) {
-    const tc = (body as any).tool_choice
-    if (tc === 'auto') {
-      (body as any).tool_choice = { type: 'auto' }
-    } else if (tc === 'none') {
-      delete (body as any).tool_choice
-    } else if (tc === 'required') {
-      (body as any).tool_choice = { type: 'any' }
-    } else if (tc?.type === 'function' && tc?.function?.name) {
-      (body as any).tool_choice = { type: 'tool', name: tc.function.name }
-    }
-  }
+  // Detect if this is an OpenAI-format request (non-Claude model names from Cursor)
+  const isOpenAIFormat = body.messages?.some((msg: any) =>
+    msg.role === 'tool' || msg.tool_calls || (msg.role === 'system' && typeof msg.content === 'string')
+  ) || (body as any).tools?.some((t: any) => t.type === 'function')
 
-  // Convert OpenAI-format tools to Anthropic format
-  if ((body as any).tools) {
-    (body as any).tools = (body as any).tools
-      .map((tool: any) => {
-        if (tool.type === 'function' && tool.function) {
-          return {
-            name: tool.function.name,
-            description: tool.function.description || '',
-            input_schema: tool.function.parameters || { type: 'object', properties: {} },
-          }
-        }
-        return tool
-      })
-  }
-
-  // Convert OpenAI-format messages to Anthropic format
-  if (body.messages) {
-    const convertedMessages: any[] = []
-    for (const msg of body.messages) {
-      if (msg.role === 'assistant' && msg.tool_calls) {
-        const content: any[] = []
-        if (msg.content && String(msg.content).trim()) {
-          content.push({ type: 'text', text: String(msg.content) })
-        }
-        for (const tc of msg.tool_calls) {
-          content.push({
-            type: 'tool_use',
-            id: tc.id,
-            name: tc.function?.name || '',
-            input: typeof tc.function?.arguments === 'string'
-              ? JSON.parse(tc.function.arguments || '{}')
-              : (tc.function?.arguments || {}),
-          })
-        }
-        convertedMessages.push({ role: 'assistant', content })
-      } else if (msg.role === 'tool') {
-        convertedMessages.push({
-          role: 'user',
-          content: [{
-            type: 'tool_result',
-            tool_use_id: msg.tool_call_id,
-            content: String(msg.content ?? '') || ' ',
-          }],
-        })
-      } else {
-        const converted = { ...msg }
-        if (converted.content === null || converted.content === undefined) {
-          // Assistant messages can omit content; user messages need non-empty text
-          if (converted.role === 'user') {
-            converted.content = ' '
-          } else {
-            converted.content = [{ type: 'text', text: ' ' }]
-          }
-        } else if (Array.isArray(converted.content)) {
-          converted.content = converted.content
-            .map((part: any) => {
-              if (part.type === 'text') {
-                const text = String(part.text ?? '').trim()
-                return text ? { ...part, text } : null
-              }
-              return part
-            })
-            .filter(Boolean)
-          if (converted.content.length === 0) {
-            converted.content = [{ type: 'text', text: ' ' }]
-          }
-        } else if (typeof converted.content === 'string' && !converted.content.trim()) {
-          converted.content = ' '
-        } else if (typeof converted.content !== 'string') {
-          converted.content = String(converted.content) || ' '
-        }
-        convertedMessages.push(converted)
+  if (isOpenAIFormat) {
+    // Convert OpenAI tool_choice format to Anthropic format
+    if ((body as any).tool_choice !== undefined) {
+      const tc = (body as any).tool_choice
+      if (tc === 'auto') {
+        (body as any).tool_choice = { type: 'auto' }
+      } else if (tc === 'none') {
+        delete (body as any).tool_choice
+      } else if (tc === 'required') {
+        (body as any).tool_choice = { type: 'any' }
+      } else if (tc?.type === 'function' && tc?.function?.name) {
+        (body as any).tool_choice = { type: 'tool', name: tc.function.name }
       }
     }
-    body.messages = convertedMessages
+
+    // Convert OpenAI-format tools to Anthropic format
+    if ((body as any).tools) {
+      (body as any).tools = (body as any).tools
+        .map((tool: any) => {
+          if (tool.type === 'function' && tool.function) {
+            return {
+              name: tool.function.name,
+              description: tool.function.description || '',
+              input_schema: tool.function.parameters || { type: 'object', properties: {} },
+            }
+          }
+          return tool
+        })
+    }
+
+    // Convert OpenAI-format messages to Anthropic format
+    if (body.messages) {
+      const convertedMessages: any[] = []
+      for (const msg of body.messages) {
+        if (msg.role === 'assistant' && msg.tool_calls) {
+          const content: any[] = []
+          if (msg.content && String(msg.content).trim()) {
+            content.push({ type: 'text', text: String(msg.content) })
+          }
+          for (const tc of msg.tool_calls) {
+            content.push({
+              type: 'tool_use',
+              id: tc.id,
+              name: tc.function?.name || '',
+              input: typeof tc.function?.arguments === 'string'
+                ? JSON.parse(tc.function.arguments || '{}')
+                : (tc.function?.arguments || {}),
+            })
+          }
+          convertedMessages.push({ role: 'assistant', content })
+        } else if (msg.role === 'tool') {
+          convertedMessages.push({
+            role: 'user',
+            content: [{
+              type: 'tool_result',
+              tool_use_id: msg.tool_call_id,
+              content: String(msg.content ?? '') || ' ',
+            }],
+          })
+        } else {
+          const converted = { ...msg }
+          if (converted.content === null || converted.content === undefined) {
+            if (converted.role === 'user') {
+              converted.content = ' '
+            } else {
+              converted.content = [{ type: 'text', text: ' ' }]
+            }
+          } else if (Array.isArray(converted.content)) {
+            converted.content = converted.content
+              .map((part: any) => {
+                if (part.type === 'text') {
+                  const text = String(part.text ?? '').trim()
+                  return text ? { ...part, text } : null
+                }
+                return part
+              })
+              .filter(Boolean)
+            if (converted.content.length === 0) {
+              converted.content = [{ type: 'text', text: ' ' }]
+            }
+          } else if (typeof converted.content === 'string' && !converted.content.trim()) {
+            converted.content = ' '
+          } else if (typeof converted.content !== 'string') {
+            converted.content = String(converted.content) || ' '
+          }
+          convertedMessages.push(converted)
+        }
+      }
+      body.messages = convertedMessages
+    }
+    console.log('[CONVERT] OpenAI -> Anthropic format conversion applied')
   }
 
   try {
