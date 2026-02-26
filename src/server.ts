@@ -19,6 +19,10 @@ import {
   isCursorKeyCheck,
   createCursorBypassResponse,
 } from './utils/cursor-byok-bypass'
+import {
+  truncateIfNeeded,
+  parseTokenLimitError,
+} from './utils/token-truncation'
 import type {
   AnthropicRequestBody,
   AnthropicResponse,
@@ -513,14 +517,44 @@ const messagesFn = async (c: Context) => {
       }
     }
 
+    // Pre-flight token truncation to avoid "prompt is too long" errors
+    if (truncateIfNeeded(body)) {
+      console.log(`[FWD] Truncated. Remaining msgs=${body.messages?.length}`)
+    }
+
     console.log(`[FWD] model=${body.model} transform=${transformToOpenAIFormat} thinking=${JSON.stringify(body.thinking)} max_tokens=${body.max_tokens} msgs=${body.messages?.length} tools=${(body as any).tools?.length ?? 0}`)
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    let response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal: c.req.raw.signal,
     })
+
+    // Retry once on token limit errors with more aggressive truncation
+    if (!response.ok && response.status === 400) {
+      const errorText = await response.text()
+      const tokenInfo = parseTokenLimitError(errorText)
+      if (tokenInfo && body.messages) {
+        console.log(`[RETRY] Token limit exceeded: ${tokenInfo.actualTokens} > ${tokenInfo.maxTokens}. Retrying with truncation...`)
+        const retryLimit = tokenInfo.maxTokens - (body.max_tokens as number || 32000) - 5000
+        truncateIfNeeded(body, retryLimit > 0 ? retryLimit : tokenInfo.maxTokens * 0.8)
+        console.log(`[RETRY] After truncation: msgs=${body.messages?.length}`)
+
+        response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: c.req.raw.signal,
+        })
+      } else {
+        console.error('API Error:', errorText)
+        return new Response(errorText, {
+          status: response.status,
+          headers: { 'Content-Type': 'text/plain' },
+        })
+      }
+    }
 
     if (!response.ok) {
       const error = await response.text()
