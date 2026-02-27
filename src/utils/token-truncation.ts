@@ -3,7 +3,7 @@ import type { AnthropicRequestBody } from '../types'
 const CHARS_PER_TOKEN = 3.5
 const DEFAULT_TOKEN_LIMIT = 195_000
 const MIN_MESSAGES_TO_KEEP = 4
-const TOKENS_PER_IMAGE = 1600 // Anthropic charges ~1600 tokens per image regardless of base64 size
+const TOKENS_PER_IMAGE = 1600
 const BASE64_PATTERN = /^data:image\/[^;]+;base64,/
 
 /**
@@ -38,10 +38,6 @@ export function estimateTokens(obj: unknown): number {
   return textTokens + imageTokens
 }
 
-/**
- * Strip base64 data from messages for accurate token counting.
- * Returns cleaned messages (shallow copy) and the count of images found.
- */
 function stripBase64FromMessages(messages: any[]): { messages: any[]; imageCount: number } {
   let imageCount = 0
 
@@ -51,8 +47,8 @@ function stripBase64FromMessages(messages: any[]): { messages: any[]; imageCount
     const hasImage = msg.content.some(
       (part: any) =>
         part.type === 'image' ||
-        (part.type === 'image_url') ||
-        (part.source?.type === 'base64'),
+        part.type === 'image_url' ||
+        part.source?.type === 'base64',
     )
     if (!hasImage) return msg
 
@@ -78,9 +74,6 @@ function stripBase64FromMessages(messages: any[]): { messages: any[]; imageCount
   return { messages: cleaned, imageCount }
 }
 
-/**
- * Estimate tokens for a single message, handling images correctly.
- */
 function estimateMessageTokens(msg: any): number {
   if (!Array.isArray(msg.content)) {
     return Math.ceil(JSON.stringify(msg).length / CHARS_PER_TOKEN)
@@ -108,90 +101,126 @@ function estimateMessageTokens(msg: any): number {
 }
 
 /**
- * After truncation, clean up tool_use / tool_result pairs that lost their counterpart.
- * Also fixes role alternation issues.
+ * Get tool_use IDs from a single message's content blocks.
+ */
+function getToolUseIds(msg: any): Set<string> {
+  const ids = new Set<string>()
+  if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+    for (const block of msg.content) {
+      if (block.type === 'tool_use' && block.id) {
+        ids.add(block.id)
+      }
+    }
+  }
+  return ids
+}
+
+/**
+ * Get tool_result IDs from a single message's content blocks.
+ */
+function getToolResultIds(msg: any): Set<string> {
+  const ids = new Set<string>()
+  if (msg.role === 'user' && Array.isArray(msg.content)) {
+    for (const block of msg.content) {
+      if (block.type === 'tool_result' && block.tool_use_id) {
+        ids.add(block.tool_use_id)
+      }
+    }
+  }
+  return ids
+}
+
+/**
+ * Clean up orphaned tool_use/tool_result pairs enforcing Anthropic's strict:
+ * each tool_result must reference a tool_use in the IMMEDIATELY PRECEDING assistant message,
+ * and each tool_use must have a matching tool_result in the IMMEDIATELY FOLLOWING user message.
+ * Runs multiple passes until the message array is stable.
  */
 function cleanupOrphanedToolMessages(messages: any[]): void {
-  // Collect all tool_use IDs present in assistant messages
-  const toolUseIds = new Set<string>()
-  for (const msg of messages) {
-    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-      for (const block of msg.content) {
-        if (block.type === 'tool_use' && block.id) {
-          toolUseIds.add(block.id)
-        }
-      }
-    }
-  }
+  let changed = true
+  let passes = 0
 
-  // Collect all tool_result IDs present in user messages
-  const toolResultIds = new Set<string>()
-  for (const msg of messages) {
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
-      for (const block of msg.content) {
-        if (block.type === 'tool_result' && block.tool_use_id) {
-          toolResultIds.add(block.tool_use_id)
-        }
-      }
-    }
-  }
+  while (changed && passes < 10) {
+    changed = false
+    passes++
 
-  // Remove orphaned tool_result blocks (referencing tool_use IDs that don't exist)
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
+    // Pass 1: For each user message containing tool_result blocks, verify that each
+    // tool_use_id exists in the immediately preceding assistant message.
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
+      if (!msg.content.some((b: any) => b.type === 'tool_result')) continue
+
+      const prevToolUseIds = i > 0 ? getToolUseIds(messages[i - 1]) : new Set<string>()
+
       const before = msg.content.length
       msg.content = msg.content.filter((block: any) => {
         if (block.type === 'tool_result' && block.tool_use_id) {
-          return toolUseIds.has(block.tool_use_id)
+          return prevToolUseIds.has(block.tool_use_id)
         }
         return true
       })
-      const removed = before - msg.content.length
-      if (removed > 0) {
-        console.log(`[TRUNCATE] Removed ${removed} orphaned tool_result block(s) from message idx ${i}`)
+
+      if (msg.content.length < before) {
+        console.log(`[TRUNCATE] Removed ${before - msg.content.length} orphaned tool_result(s) from msg ${i} (missing tool_use in prev assistant)`)
+        changed = true
       }
+
       if (msg.content.length === 0) {
         messages.splice(i, 1)
         console.log(`[TRUNCATE] Removed empty user message at idx ${i}`)
+        changed = true
       }
     }
-  }
 
-  // Remove orphaned tool_use blocks (no matching tool_result follows)
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
-    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+    // Pass 2: For each assistant message containing tool_use blocks, verify that each
+    // tool_use id a matching tool_result in the immediately following user message.
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+      if (!msg.content.some((b: any) => b.type === 'tool_use')) continue
+
+      const nextToolResultIds = i + 1 < messages.length ? getToolResultIds(messages[i + 1]) : new Set<string>()
+
       const before = msg.content.length
       msg.content = msg.content.filter((block: any) => {
         if (block.type === 'tool_use' && block.id) {
-          return toolResultIds.has(block.id)
+          return nextToolResultIds.has(block.id)
         }
         return true
       })
-      const removed = before - msg.content.length
-      if (removed > 0) {
-        console.log(`[TRUNCATE] Removed ${removed} orphaned tool_use block(s) from message idx ${i}`)
+
+      if (msg.content.length < before) {
+        console.log(`[TRUNCATE] Removed ${before - msg.content.length} orphaned tool_use(s) from msg ${i} (missing tool_result in next user)`)
+        changed = true
       }
+
       if (msg.content.length === 0) {
         messages.splice(i, 1)
         console.log(`[TRUNCATE] Removed empty assistant message at idx ${i}`)
+        changed = true
       }
     }
-  }
 
-  // Fix role alternation: merge or remove consecutive same-role messages
-  for (let i = messages.length - 1; i > 0; i--) {
-    if (messages[i].role === messages[i - 1].role) {
-      messages.splice(i, 1)
-      console.log(`[TRUNCATE] Removed consecutive duplicate ${messages[i - 1]?.role} at idx ${i}`)
+    // Pass 3: Fix role alternation — remove consecutive same-role messages
+    for (let i = messages.length - 1; i > 0; i--) {
+      if (messages[i].role === messages[i - 1].role) {
+        console.log(`[TRUNCATE] Removed consecutive duplicate ${messages[i].role} at idx ${i}`)
+        messages.splice(i, 1)
+        changed = true
+      }
+    }
+
+    // Ensure first message is from user
+    while (messages.length > 0 && messages[0].role !== 'user') {
+      console.log(`[TRUNCATE] Removed leading ${messages[0].role} message`)
+      messages.splice(0, 1)
+      changed = true
     }
   }
 
-  // Ensure first message is from user
-  while (messages.length > 0 && messages[0].role !== 'user') {
-    console.log(`[TRUNCATE] Removed leading ${messages[0].role} message`)
-    messages.splice(0, 1)
+  if (passes > 1) {
+    console.log(`[TRUNCATE] Cleanup stabilized after ${passes} passes`)
   }
 }
 
@@ -225,8 +254,6 @@ export function truncateIfNeeded(
 
   console.log(`[TRUNCATE] 🔪 Need to remove ~${overageTokens} tokens (~${Math.ceil(overageChars)} chars). Messages: ${messages.length}`)
 
-  // Strategy: preserve first 2 messages (original user question + first assistant reply)
-  // and the last MIN_MESSAGES_TO_KEEP messages. Remove from the middle.
   const preserveStart = 2
   const preserveEnd = MIN_MESSAGES_TO_KEEP
   const removableStart = preserveStart
@@ -261,7 +288,7 @@ export function truncateIfNeeded(
     cleanupOrphanedToolMessages(messages)
 
     const newEstimate = estimateTokens(body)
-    console.log(`[TRUNCATE] After truncation: ~${newEstimate} estimated tokens, ${messages.length} messages`)
+    console.log(`[TRUNCATE] After cleanup: ~${newEstimate} estimated tokens, ${messages.length} messages`)
 
     return true
   }
