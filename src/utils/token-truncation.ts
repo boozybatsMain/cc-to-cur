@@ -6,10 +6,6 @@ const MIN_MESSAGES_TO_KEEP = 4
 const TOKENS_PER_IMAGE = 1600
 const BASE64_PATTERN = /^data:image\/[^;]+;base64,/
 
-/**
- * Estimate tokens for an object, correctly handling base64 images.
- * Images are counted as a fixed ~1600 tokens instead of by character length.
- */
 export function estimateTokens(obj: unknown): number {
   if (obj === null || obj === undefined) return 0
 
@@ -40,10 +36,8 @@ export function estimateTokens(obj: unknown): number {
 
 function stripBase64FromMessages(messages: any[]): { messages: any[]; imageCount: number } {
   let imageCount = 0
-
   const cleaned = messages.map((msg: any) => {
     if (!Array.isArray(msg.content)) return msg
-
     const hasImage = msg.content.some(
       (part: any) =>
         part.type === 'image' ||
@@ -51,7 +45,6 @@ function stripBase64FromMessages(messages: any[]): { messages: any[]; imageCount
         part.source?.type === 'base64',
     )
     if (!hasImage) return msg
-
     const newContent = msg.content.map((part: any) => {
       if (part.source?.type === 'base64') {
         imageCount++
@@ -67,10 +60,8 @@ function stripBase64FromMessages(messages: any[]): { messages: any[]; imageCount
       }
       return part
     })
-
     return { ...msg, content: newContent }
   })
-
   return { messages: cleaned, imageCount }
 }
 
@@ -78,7 +69,6 @@ function estimateMessageTokens(msg: any): number {
   if (!Array.isArray(msg.content)) {
     return Math.ceil(JSON.stringify(msg).length / CHARS_PER_TOKEN)
   }
-
   let imageCount = 0
   const cleanedContent = msg.content.map((part: any) => {
     if (part.source?.type === 'base64') {
@@ -95,138 +85,74 @@ function estimateMessageTokens(msg: any): number {
     }
     return part
   })
-
   const textTokens = Math.ceil(JSON.stringify({ ...msg, content: cleanedContent }).length / CHARS_PER_TOKEN)
   return textTokens + imageCount * TOKENS_PER_IMAGE
 }
 
-/**
- * Get tool_use IDs from a single message's content blocks.
- */
-function getToolUseIds(msg: any): Set<string> {
-  const ids = new Set<string>()
-  if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-    for (const block of msg.content) {
-      if (block.type === 'tool_use' && block.id) {
-        ids.add(block.id)
-      }
-    }
-  }
-  return ids
+interface Round {
+  startIdx: number
+  endIdx: number // exclusive
+  tokens: number
+  msgCount: number
 }
 
 /**
- * Get tool_result IDs from a single message's content blocks.
+ * Groups messages into complete conversation rounds. A round starts with a user
+ * message (the human turn) and includes all subsequent assistant→user(tool_result)
+ * exchanges until the next "real" user message (one that isn't just tool_results).
+ *
+ * Example conversation:
+ *   [0] user "fix the bug"           ← Round 1 start
+ *   [1] assistant (text + tool_use)
+ *   [2] user (tool_result)
+ *   [3] assistant (text + tool_use)
+ *   [4] user (tool_result)
+ *   [5] assistant "done!"
+ *   [6] user "now add tests"         ← Round 2 start
+ *   [7] assistant "ok, here..."
+ *
+ * Round 1 = messages 0..5 (indices 0-5), Round 2 = messages 6..7
+ *
+ * Removing a full round is always safe — no orphaned tool pairs.
  */
-function getToolResultIds(msg: any): Set<string> {
-  const ids = new Set<string>()
-  if (msg.role === 'user' && Array.isArray(msg.content)) {
-    for (const block of msg.content) {
-      if (block.type === 'tool_result' && block.tool_use_id) {
-        ids.add(block.tool_use_id)
-      }
-    }
-  }
-  return ids
-}
+function groupIntoRounds(messages: any[]): Round[] {
+  const rounds: Round[] = []
+  let roundStart = 0
 
-/**
- * Clean up orphaned tool_use/tool_result pairs enforcing Anthropic's strict:
- * each tool_result must reference a tool_use in the IMMEDIATELY PRECEDING assistant message,
- * and each tool_use must have a matching tool_result in the IMMEDIATELY FOLLOWING user message.
- * Runs multiple passes until the message array is stable.
- */
-function cleanupOrphanedToolMessages(messages: any[]): void {
-  let changed = true
-  let passes = 0
+  for (let i = 1; i < messages.length; i++) {
+    const msg = messages[i]
 
-  while (changed && passes < 10) {
-    changed = false
-    passes++
+    // A new round starts at a user message that is NOT a pure tool_result response
+    if (msg.role === 'user') {
+      const isPureToolResult = Array.isArray(msg.content) &&
+        msg.content.length > 0 &&
+        msg.content.every((b: any) => b.type === 'tool_result')
 
-    // Pass 1: For each user message containing tool_result blocks, verify that each
-    // tool_use_id exists in the immediately preceding assistant message.
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i]
-      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-      if (!msg.content.some((b: any) => b.type === 'tool_result')) continue
-
-      const prevToolUseIds = i > 0 ? getToolUseIds(messages[i - 1]) : new Set<string>()
-
-      const before = msg.content.length
-      msg.content = msg.content.filter((block: any) => {
-        if (block.type === 'tool_result' && block.tool_use_id) {
-          return prevToolUseIds.has(block.tool_use_id)
+      if (!isPureToolResult) {
+        // Close the previous round
+        let tokens = 0
+        for (let j = roundStart; j < i; j++) {
+          tokens += estimateMessageTokens(messages[j])
         }
-        return true
-      })
-
-      if (msg.content.length < before) {
-        console.log(`[TRUNCATE] Removed ${before - msg.content.length} orphaned tool_result(s) from msg ${i} (missing tool_use in prev assistant)`)
-        changed = true
+        rounds.push({ startIdx: roundStart, endIdx: i, tokens, msgCount: i - roundStart })
+        roundStart = i
       }
-
-      if (msg.content.length === 0) {
-        messages.splice(i, 1)
-        console.log(`[TRUNCATE] Removed empty user message at idx ${i}`)
-        changed = true
-      }
-    }
-
-    // Pass 2: For each assistant message containing tool_use blocks, verify that each
-    // tool_use id a matching tool_result in the immediately following user message.
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i]
-      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
-      if (!msg.content.some((b: any) => b.type === 'tool_use')) continue
-
-      const nextToolResultIds = i + 1 < messages.length ? getToolResultIds(messages[i + 1]) : new Set<string>()
-
-      const before = msg.content.length
-      msg.content = msg.content.filter((block: any) => {
-        if (block.type === 'tool_use' && block.id) {
-          return nextToolResultIds.has(block.id)
-        }
-        return true
-      })
-
-      if (msg.content.length < before) {
-        console.log(`[TRUNCATE] Removed ${before - msg.content.length} orphaned tool_use(s) from msg ${i} (missing tool_result in next user)`)
-        changed = true
-      }
-
-      if (msg.content.length === 0) {
-        messages.splice(i, 1)
-        console.log(`[TRUNCATE] Removed empty assistant message at idx ${i}`)
-        changed = true
-      }
-    }
-
-    // Pass 3: Fix role alternation — remove consecutive same-role messages
-    for (let i = messages.length - 1; i > 0; i--) {
-      if (messages[i].role === messages[i - 1].role) {
-        console.log(`[TRUNCATE] Removed consecutive duplicate ${messages[i].role} at idx ${i}`)
-        messages.splice(i, 1)
-        changed = true
-      }
-    }
-
-    // Ensure first message is from user
-    while (messages.length > 0 && messages[0].role !== 'user') {
-      console.log(`[TRUNCATE] Removed leading ${messages[0].role} message`)
-      messages.splice(0, 1)
-      changed = true
     }
   }
 
-  if (passes > 1) {
-    console.log(`[TRUNCATE] Cleanup stabilized after ${passes} passes`)
+  // Close the last round
+  let tokens = 0
+  for (let j = roundStart; j < messages.length; j++) {
+    tokens += estimateMessageTokens(messages[j])
   }
+  rounds.push({ startIdx: roundStart, endIdx: messages.length, tokens, msgCount: messages.length - roundStart })
+
+  return rounds
 }
 
 /**
- * Truncates messages from the MIDDLE of the conversation to fit within token limit.
- * Preserves: system prompt, tools, first user message (original question), and recent messages.
+ * Truncates complete conversation rounds from the middle to fit within token limit.
+ * Preserves the first round (original user question) and the last rounds (recent context).
  */
 export function truncateIfNeeded(
   body: AnthropicRequestBody,
@@ -250,55 +176,117 @@ export function truncateIfNeeded(
   }
 
   const overageTokens = totalEstimate - tokenLimit
-  const overageChars = overageTokens * CHARS_PER_TOKEN
+  console.log(`[TRUNCATE] 🔪 Need to remove ~${overageTokens} tokens. Total messages: ${messages.length}`)
 
-  console.log(`[TRUNCATE] 🔪 Need to remove ~${overageTokens} tokens (~${Math.ceil(overageChars)} chars). Messages: ${messages.length}`)
+  const rounds = groupIntoRounds(messages)
+  console.log(`[TRUNCATE] Found ${rounds.length} conversation rounds: ${rounds.map((r, i) => `R${i}[msgs ${r.startIdx}-${r.endIdx - 1}, ${r.tokens}t]`).join(', ')}`)
 
-  const preserveStart = 2
-  const preserveEnd = MIN_MESSAGES_TO_KEEP
-  const removableStart = preserveStart
-  const removableEnd = messages.length - preserveEnd
-
-  if (removableStart >= removableEnd) {
-    console.log(`[TRUNCATE] ⚠️ Not enough messages in the middle to remove (preserveStart=${preserveStart}, preserveEnd=${preserveEnd}, total=${messages.length})`)
+  if (rounds.length <= 2) {
+    console.log(`[TRUNCATE] ⚠️ Only ${rounds.length} round(s) — cannot remove any`)
     return false
   }
 
+  // Always preserve first round and last round; remove from the middle
+  const removableRounds = rounds.slice(1, -1)
   let removedTokens = 0
-  let removeFromIdx = removableStart
-  let removeToIdx = removableStart
-  const removedRoles: string[] = []
+  const roundsToRemove: number[] = []
 
-  for (let i = removableStart; i < removableEnd; i++) {
-    const msgTokens = estimateMessageTokens(messages[i])
-    removedTokens += msgTokens
-    removedRoles.push(`${messages[i].role}(${msgTokens}t)`)
-    removeToIdx = i + 1
+  for (let r = 0; r < removableRounds.length; r++) {
+    roundsToRemove.push(r + 1) // +1 because index 0 is preserved
+    removedTokens += removableRounds[r].tokens
     if (removedTokens >= overageTokens) break
   }
 
-  const removeCount = removeToIdx - removeFromIdx
-  if (removeCount > 0) {
-    const removed = messages.splice(removeFromIdx, removeCount)
-    console.log(
-      `[TRUNCATE] ✅ Removed ${removed.length} MIDDLE messages (idx ${removeFromIdx}..${removeToIdx - 1}, ~${removedTokens} tokens). Remaining: ${messages.length} messages`,
-    )
-    console.log(`[TRUNCATE] Removed breakdown: ${removedRoles.join(', ')}`)
+  if (roundsToRemove.length === 0) return false
 
-    cleanupOrphanedToolMessages(messages)
-
-    const newEstimate = estimateTokens(body)
-    console.log(`[TRUNCATE] After cleanup: ~${newEstimate} estimated tokens, ${messages.length} messages`)
-
-    return true
+  // all message indices to remove
+  const indicesToRemove: number[] = []
+  for (const roundIdx of roundsToRemove) {
+    const round = rounds[roundIdx]
+    for (let idx = round.startIdx; idx < round.endIdx; idx++) {
+      indicesToRemove.push(idx)
+    }
   }
 
-  return false
+  console.log(`[TRUNCATE] Removing ${roundsToRemove.length} round(s) (${indicesToRemove.length} messages, ~${removedTokens} tokens)`)
+
+  // Remove in reverse order
+  indicesToRemove.sort((a, b) => b - a)
+  for (const idx of indicesToRemove) {
+    messages.splice(idx, 1)
+  }
+
+  console.log(`[TRUNCATE] ✅ After removal: ${messages.length} messages`)
+
+  // Validate
+  const issues = validateMessages(messages)
+  if (issues.length > 0) {
+    console.log(`[TRUNCATE] ⚠️ Validation issues: ${issues.join('; ')}`)
+  }
+
+  const newEstimate = estimateTokens(body)
+  console.log(`[TRUNCATE] Final estimate: ~${newEstimate} tokens, ${messages.length} messages`)
+
+  return true
 }
 
-/**
- * Parses the token count from an Anthropic "prompt is too long" error.
- */
+function getToolUseIds(msg: any): Set<string> {
+  const ids = new Set<string>()
+  if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+    for (const block of msg.content) {
+      if (block.type === 'tool_use' && block.id) ids.add(block.id)
+    }
+  }
+  return ids
+}
+
+function getToolResultIds(msg: any): Set<string> {
+  const ids = new Set<string>()
+  if (msg.role === 'user' && Array.isArray(msg.content)) {
+    for (const block of msg.content) {
+      if (block.type === 'tool_result' && block.tool_use_id) ids.add(block.tool_use_id)
+    }
+  }
+  return ids
+}
+
+function validateMessages(messages: any[]): string[] {
+  const issues: string[] = []
+  if (messages.length === 0) return ['No messages']
+  if (messages[0].role !== 'user') {
+    issues.push(`First message is ${messages[0].role}, expected user`)
+  }
+  for (let i = 1; i < messages.length; i++) {
+    if (messages[i].role === messages[i - 1].role) {
+      issues.push(`Consecutive ${messages[i].role} at idx ${i - 1},${i}`)
+    }
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]
+    if (msg.role === 'user' && Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_result' && block.tool_use_id) {
+          const prevUseIds = i > 0 ? getToolUseIds(messages[i - 1]) : new Set<string>()
+          if (!prevUseIds.has(block.tool_use_id)) {
+            issues.push(`Orphaned tool_result ${block.tool_use_id} at msg ${i}`)
+          }
+        }
+      }
+    }
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_use' && block.id) {
+          const nextResultIds = i + 1 < messages.length ? getToolResultIds(messages[i + 1]) : new Set<string>()
+          if (!nextResultIds.has(block.id)) {
+            issues.push(`Orphaned tool_use ${block.id} at msg ${i}`)
+          }
+        }
+      }
+    }
+  }
+  return issues
+}
+
 export function parseTokenLimitError(
   errorText: string,
 ): { actualTokens: number; maxTokens: number } | null {
