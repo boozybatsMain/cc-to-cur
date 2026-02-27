@@ -108,6 +108,94 @@ function estimateMessageTokens(msg: any): number {
 }
 
 /**
+ * After truncation, clean up tool_use / tool_result pairs that lost their counterpart.
+ * Also fixes role alternation issues.
+ */
+function cleanupOrphanedToolMessages(messages: any[]): void {
+  // Collect all tool_use IDs present in assistant messages
+  const toolUseIds = new Set<string>()
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_use' && block.id) {
+          toolUseIds.add(block.id)
+        }
+      }
+    }
+  }
+
+  // Collect all tool_result IDs present in user messages
+  const toolResultIds = new Set<string>()
+  for (const msg of messages) {
+    if (msg.role === 'user' && Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_result' && block.tool_use_id) {
+          toolResultIds.add(block.tool_use_id)
+        }
+      }
+    }
+  }
+
+  // Remove orphaned tool_result blocks (referencing tool_use IDs that don't exist)
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.role === 'user' && Array.isArray(msg.content)) {
+      const before = msg.content.length
+      msg.content = msg.content.filter((block: any) => {
+        if (block.type === 'tool_result' && block.tool_use_id) {
+          return toolUseIds.has(block.tool_use_id)
+        }
+        return true
+      })
+      const removed = before - msg.content.length
+      if (removed > 0) {
+        console.log(`[TRUNCATE] Removed ${removed} orphaned tool_result block(s) from message idx ${i}`)
+      }
+      if (msg.content.length === 0) {
+        messages.splice(i, 1)
+        console.log(`[TRUNCATE] Removed empty user message at idx ${i}`)
+      }
+    }
+  }
+
+  // Remove orphaned tool_use blocks (no matching tool_result follows)
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      const before = msg.content.length
+      msg.content = msg.content.filter((block: any) => {
+        if (block.type === 'tool_use' && block.id) {
+          return toolResultIds.has(block.id)
+        }
+        return true
+      })
+      const removed = before - msg.content.length
+      if (removed > 0) {
+        console.log(`[TRUNCATE] Removed ${removed} orphaned tool_use block(s) from message idx ${i}`)
+      }
+      if (msg.content.length === 0) {
+        messages.splice(i, 1)
+        console.log(`[TRUNCATE] Removed empty assistant message at idx ${i}`)
+      }
+    }
+  }
+
+  // Fix role alternation: merge or remove consecutive same-role messages
+  for (let i = messages.length - 1; i > 0; i--) {
+    if (messages[i].role === messages[i - 1].role) {
+      messages.splice(i, 1)
+      console.log(`[TRUNCATE] Removed consecutive duplicate ${messages[i - 1]?.role} at idx ${i}`)
+    }
+  }
+
+  // Ensure first message is from user
+  while (messages.length > 0 && messages[0].role !== 'user') {
+    console.log(`[TRUNCATE] Removed leading ${messages[0].role} message`)
+    messages.splice(0, 1)
+  }
+}
+
+/**
  * Truncates messages from the MIDDLE of the conversation to fit within token limit.
  * Preserves: system prompt, tools, first user message (original question), and recent messages.
  */
@@ -170,36 +258,7 @@ export function truncateIfNeeded(
     )
     console.log(`[TRUNCATE] Removed breakdown: ${removedRoles.join(', ')}`)
 
-    // Fix alternation: if removal created two consecutive same-role messages
-    for (let i = removeFromIdx; i < messages.length - 1; i++) {
-      if (messages[i].role === messages[i - 1]?.role && messages[i].role === 'assistant') {
-        messages.splice(i, 1)
-        console.log(`[TRUNCATE] Removed duplicate assistant at idx ${i}`)
-        i--
-      }
-    }
-    // Remove orphaned tool_result messages at the splice point
-    while (
-      removeFromIdx < messages.length &&
-      messages[removeFromIdx].role === 'user' &&
-      Array.isArray(messages[removeFromIdx].content) &&
-      messages[removeFromIdx].content.every((c: any) => c.type === 'tool_result')
-    ) {
-      messages.splice(removeFromIdx, 1)
-      console.log('[TRUNCATE] Removed orphaned tool_result message at splice point')
-    }
-
-    // Ensure no two consecutive same-role messages at splice boundary
-    if (
-      removeFromIdx > 0 &&
-      removeFromIdx < messages.length &&
-      messages[removeFromIdx - 1].role === messages[removeFromIdx].role
-    ) {
-      if (messages[removeFromIdx].role === 'assistant') {
-        messages.splice(removeFromIdx, 1)
-        console.log('[TRUNCATE] Removed duplicate role at boundary')
-      }
-    }
+    cleanupOrphanedToolMessages(messages)
 
     const newEstimate = estimateTokens(body)
     console.log(`[TRUNCATE] After truncation: ~${newEstimate} estimated tokens, ${messages.length} messages`)
