@@ -422,6 +422,9 @@ const messagesFn = async (c: Context) => {
     console.log('[CONVERT] OpenAI -> Anthropic format conversion applied')
   }
 
+  let didTimeout = false
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+
   try {
     let transformToOpenAIFormat = false
 
@@ -524,11 +527,29 @@ const messagesFn = async (c: Context) => {
 
     console.log(`[FWD] model=${body.model} transform=${transformToOpenAIFormat} thinking=${JSON.stringify(body.thinking)} max_tokens=${body.max_tokens} msgs=${body.messages?.length} tools=${(body as any).tools?.length ?? 0}`)
 
+    // Graceful timeout: fire before Vercel's hard limit so we can return a proper error.
+    // Vercel maxDuration is 800s; use 780s to leave margin for cleanup.
+    // In local dev (no VERCEL env), use no timeout.
+    const FUNCTION_TIMEOUT_MS = process.env.VERCEL ? 780_000 : 0
+    const timeoutController = new AbortController()
+    if (FUNCTION_TIMEOUT_MS > 0) {
+      timeoutTimer = setTimeout(() => {
+        didTimeout = true
+        timeoutController.abort()
+        console.error(`[TIMEOUT] Anthropic request aborted after ${FUNCTION_TIMEOUT_MS / 1000}s`)
+      }, FUNCTION_TIMEOUT_MS)
+    }
+
+    // Combine client disconnect signal with our timeout signal
+    const combinedSignal = FUNCTION_TIMEOUT_MS > 0
+      ? AbortSignal.any([c.req.raw.signal, timeoutController.signal])
+      : c.req.raw.signal
+
     let response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: c.req.raw.signal,
+      signal: combinedSignal,
     })
 
     // Retry once on token limit errors with more aggressive truncation
@@ -545,9 +566,10 @@ const messagesFn = async (c: Context) => {
           method: 'POST',
           headers,
           body: JSON.stringify(body),
-          signal: c.req.raw.signal,
+          signal: combinedSignal,
         })
       } else {
+        if (timeoutTimer) clearTimeout(timeoutTimer)
         console.error('API Error:', errorText)
         return new Response(errorText, {
           status: response.status,
@@ -557,6 +579,7 @@ const messagesFn = async (c: Context) => {
     }
 
     if (!response.ok) {
+      if (timeoutTimer) clearTimeout(timeoutTimer)
       const error = await response.text()
       console.error('API Error:', error)
 
@@ -611,7 +634,6 @@ const messagesFn = async (c: Context) => {
 
               for (const result of results) {
                 if (result.type === 'ping') {
-                  // Forward as SSE comment to keep connection alive during long thinking
                   await stream.write(': ping\n\n')
                 } else if (result.type === 'chunk') {
                   const dataToSend = `data: ${JSON.stringify(result.data)}\n\n`
@@ -627,13 +649,43 @@ const messagesFn = async (c: Context) => {
               await stream.write(chunk)
             }
           }
-        } catch (error) {
-          console.error('Stream error:', error)
+        } catch (error: any) {
+          const isTimeout = didTimeout || error?.name === 'AbortError' || error?.name === 'TimeoutError'
+          if (isTimeout) {
+            console.error(`[TIMEOUT] Stream aborted - function approaching Vercel timeout limit`)
+            if (transformToOpenAIFormat) {
+              const timeoutMsg = {
+                id: 'chatcmpl-timeout',
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: body.model,
+                choices: [{
+                  index: 0,
+                  delta: { content: '\n\n[Error: Request timed out. The model was thinking for too long. Try a simpler prompt or reduce conversation history.]' },
+                  finish_reason: null,
+                }],
+              }
+              await stream.write(`data: ${JSON.stringify(timeoutMsg)}\n\n`)
+              const stopMsg = {
+                ...timeoutMsg,
+                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              }
+              await stream.write(`data: ${JSON.stringify(stopMsg)}\n\n`)
+              await stream.write('data: [DONE]\n\n')
+            } else {
+              const timeoutEvent = `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'timeout_error', message: 'Request timed out. The model was thinking for too long.' } })}\n\n`
+              await stream.write(timeoutEvent)
+            }
+          } else {
+            console.error('Stream error:', error)
+          }
         } finally {
+          if (timeoutTimer) clearTimeout(timeoutTimer)
           reader.releaseLock()
         }
       })
     } else {
+      if (timeoutTimer) clearTimeout(timeoutTimer)
       const responseData = (await response.json()) as AnthropicResponse
 
       if (transformToOpenAIFormat) {
@@ -656,7 +708,19 @@ const messagesFn = async (c: Context) => {
 
       return c.json(responseData)
     }
-  } catch (error) {
+  } catch (error: any) {
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    const isTimeout = didTimeout || error?.name === 'AbortError' || error?.name === 'TimeoutError'
+    if (isTimeout) {
+      console.error(`[TIMEOUT] Request aborted after approaching Vercel timeout limit`)
+      return c.json<ErrorResponse>(
+        {
+          error: 'Request timed out',
+          message: 'The model was thinking for too long and the request exceeded the server time limit. Try a simpler prompt or reduce conversation history.',
+        },
+        504,
+      )
+    }
     console.error('Proxy error:', error)
     return c.json<ErrorResponse>(
       { error: 'Proxy error', details: (error as Error).message },

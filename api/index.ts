@@ -2,6 +2,7 @@ import { handle } from 'hono/vercel'
 import app from '../src/server'
 
 export const runtime = 'nodejs'
+export const maxDuration = 800
 
 // Export handlers for all HTTP methods
 export const GET = handle(app)
