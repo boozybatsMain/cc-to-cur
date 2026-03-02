@@ -457,20 +457,21 @@ const messagesFn = async (c: Context) => {
       }
 
       if (body.model.includes('opus')) {
-        body.max_tokens = 32_000
+        body.max_tokens = 16_000
       }
       if (body.model.includes('sonnet')) {
         body.max_tokens = 64_000
       }
 
       // Enable extended thinking
-      // Opus 4.6+ requires adaptive thinking (budget_tokens is deprecated)
-      if (body.model.includes('opus-4-6')) {
+      // Configurable via THINKING_EFFORT env var: low, medium, high (default), max
+      const thinkingEffort = (process.env.THINKING_EFFORT || 'high').toLowerCase()
+      if (body.model.includes('opus-4-6') || body.model.includes('sonnet-4-6')) {
         body.thinking = {
           type: 'adaptive',
         }
+        ;(body as any).output_config = { effort: thinkingEffort }
       } else {
-        // Older models use budget_tokens
         const maxTokens = (body.max_tokens as number) || 32000
         body.thinking = {
           type: 'enabled',
