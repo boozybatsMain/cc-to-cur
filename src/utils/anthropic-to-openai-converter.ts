@@ -135,11 +135,19 @@ interface MetricsData {
   answerStarted: boolean
   thinkingBuffer: string
   needsBullet: boolean
+  trailingWhitespace: string
 }
 
 interface ProcessResult {
   type: 'chunk' | 'done' | 'ping'
   data?: OpenAIStreamChunk
+}
+
+const MARKDOWN_ESCAPE_RE = /[*`_~\[\]\\]/g
+const MARKDOWN_SPECIAL_CHAR = /[*`_~\[\]\\]/
+
+function escapeMarkdown(text: string): string {
+  return text.replace(MARKDOWN_ESCAPE_RE, '\\$&')
 }
 
 // Converter state that needs to be maintained during streaming
@@ -166,6 +174,7 @@ export function createConverterState(): ConverterState {
       answerStarted: false,
       thinkingBuffer: '',
       needsBullet: true,
+      trailingWhitespace: '',
     },
   }
 }
@@ -214,7 +223,7 @@ export function convertNonStreamingResponse(
         .split(/\n+/)
         .map((t: string) => t.trim())
         .filter((t: string) => t.length > 0)
-        .map((t: string) => `*${t}*`)
+        .map((t: string) => `*${escapeMarkdown(t)}*`)
         .join('\n\n')
       textContent += `🧠💭\n\n${lines}\n\n💤🧠\n\n---\n\n👉🏼 `
       continue
@@ -274,7 +283,7 @@ export function processChunk(
         if (data.type === 'content_block_stop') {
           if (state.metricsData.inThinking) {
             state.metricsData.inThinking = false
-            // If needsBullet is true, italic was already closed by a newline
+            state.metricsData.trailingWhitespace = ''
             const closeItalic = state.metricsData.needsBullet ? '' : '*'
             const closeChunk: OpenAIStreamChunk = {
               id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
@@ -316,6 +325,7 @@ export function processChunk(
         // Fallback: close thinking if still open when message stops
         if (data.type === 'message_stop' && state.metricsData.inThinking) {
           state.metricsData.inThinking = false
+          state.metricsData.trailingWhitespace = ''
           const closeItalic = state.metricsData.needsBullet ? '' : '*'
           const thinkingChunk: OpenAIStreamChunk = {
             id: state.metricsData.openAIId || 'chatcmpl-' + Date.now(),
@@ -591,25 +601,40 @@ function transformToOpenAI(
       state.metricsData.hadThinking = true
       state.metricsData.answerStarted = false
       state.metricsData.needsBullet = true
+      state.metricsData.trailingWhitespace = ''
       content = '🧠💭\n\n'
     }
 
     const text = data.delta.thinking
     let processed = ''
     for (let i = 0; i < text.length; i++) {
-      if (text[i] === '\n') {
-        // Close italic, mark that next non-empty content needs a bullet
+      const ch = text[i]
+      if (ch === '\n') {
+        // Discard buffered trailing whitespace before closing italic
+        state.metricsData.trailingWhitespace = ''
         if (!state.metricsData.needsBullet) {
           processed += '*'
           state.metricsData.needsBullet = true
         }
+      } else if (ch === ' ' || ch === '\t') {
+        if (!state.metricsData.needsBullet) {
+          state.metricsData.trailingWhitespace += ch
+        }
       } else {
-        // Non-whitespace character - add bullet prefix if needed
-        if (state.metricsData.needsBullet && text[i].trim()) {
+        // Flush buffered whitespace before this visible character
+        if (state.metricsData.trailingWhitespace) {
+          processed += state.metricsData.trailingWhitespace
+          state.metricsData.trailingWhitespace = ''
+        }
+        if (state.metricsData.needsBullet) {
           processed += '\n\n*'
           state.metricsData.needsBullet = false
         }
-        processed += text[i]
+        if (MARKDOWN_SPECIAL_CHAR.test(ch)) {
+          processed += '\\' + ch
+        } else {
+          processed += ch
+        }
       }
     }
 
