@@ -1,7 +1,7 @@
 import type { AnthropicRequestBody } from '../types'
 
-const CHARS_PER_TOKEN = 3.5
-const DEFAULT_TOKEN_LIMIT = 195_000
+const CHARS_PER_TOKEN = 2.8
+const DEFAULT_TOKEN_LIMIT = 130_000
 const MIN_MESSAGES_TO_KEEP = 4
 const TOKENS_PER_IMAGE = 1600
 const BASE64_PATTERN = /^data:image\/[^;]+;base64,/
@@ -196,8 +196,9 @@ export function truncateIfNeeded(
     return false
   }
 
-  const overageTokens = totalEstimate - tokenLimit
-  console.log(`[TRUNCATE] 🔪 Need to remove ~${overageTokens} tokens. Total messages: ${messages.length}`)
+  // Add 25% safety buffer to account for token estimation inaccuracy
+  const overageTokens = Math.ceil((totalEstimate - tokenLimit) * 1.25)
+  console.log(`[TRUNCATE] 🔪 Need to remove ~${overageTokens} tokens (with 25% safety buffer). Total messages: ${messages.length}`)
 
   // Strategy A: remove complete middle rounds
   const rounds = groupIntoRounds(messages)

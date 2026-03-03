@@ -553,23 +553,12 @@ const messagesFn = async (c: Context) => {
       signal: combinedSignal,
     })
 
-    // Retry once on token limit errors with more aggressive truncation
-    if (!response.ok && response.status === 400) {
+    // Retry on token limit errors with progressively more aggressive truncation
+    const MAX_RETRIES = 5
+    for (let attempt = 0; attempt < MAX_RETRIES && !response.ok && response.status === 400; attempt++) {
       const errorText = await response.text()
       const tokenInfo = parseTokenLimitError(errorText)
-      if (tokenInfo && body.messages) {
-        console.log(`[RETRY] Token limit exceeded: ${tokenInfo.actualTokens} > ${tokenInfo.maxTokens}. Retrying with truncation...`)
-        const retryLimit = tokenInfo.maxTokens - (body.max_tokens as number || 32000) - 5000
-        truncateIfNeeded(body, retryLimit > 0 ? retryLimit : tokenInfo.maxTokens * 0.8)
-        console.log(`[RETRY] After truncation: msgs=${body.messages?.length}`)
-
-        response = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: combinedSignal,
-        })
-      } else {
+      if (!tokenInfo || !body.messages) {
         if (timeoutTimer) clearTimeout(timeoutTimer)
         console.error('API Error:', errorText)
         return new Response(errorText, {
@@ -577,6 +566,29 @@ const messagesFn = async (c: Context) => {
           headers: { 'Content-Type': 'text/plain' },
         })
       }
+
+      // Use the real limit from Anthropic's error, apply a safety margin that with each retry to account for estimation inaccuracy
+      const safetyMargin = 0.15 + (attempt * 0.05)
+      const targetLimit = Math.floor(tokenInfo.maxTokens * (1 - safetyMargin))
+      console.log(`[RETRY ${attempt + 1}/${MAX_RETRIES}] ${tokenInfo.actualTokens} > ${tokenInfo.maxTokens}. Target: ${targetLimit} tokens (safety margin: ${Math.round(safetyMargin * 100)}%)`)
+
+      const didTruncate = truncateIfNeeded(body, targetLimit)
+      if (!didTruncate) {
+        console.log(`[RETRY] Cannot truncate further — ${body.messages.length} messages remaining`)
+        if (timeoutTimer) clearTimeout(timeoutTimer)
+        return new Response(errorText, {
+          status: 400,
+          headers: { 'Content-Type': 'text/plain' },
+        })
+      }
+      console.log(`[RETRY] After truncation: msgs=${body.messages?.length}`)
+
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: combinedSignal,
+      })
     }
 
     if (!response.ok) {
